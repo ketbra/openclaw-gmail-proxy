@@ -1,4 +1,6 @@
-use gmail_proxy::scrub::query::{parse_query, QueryNode};
+use gmail_proxy::scrub::query::{
+    parse_query, reconstruct_query, reconstruct_with_label_exclusion, validate_query, QueryNode,
+};
 
 #[test]
 fn test_parse_single_word() {
@@ -214,4 +216,186 @@ fn test_rejects_query_over_length_limit() {
     let long_query = "a ".repeat(600); // ~1200 chars
     let result = parse_query(&long_query);
     assert!(result.is_err());
+}
+
+// --- Validation tests ---
+
+#[test]
+fn test_validate_rejects_blocked_label() {
+    let node = parse_query("label:agent-blocked").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("security") || err.contains("blocked") || err.contains("label"),
+        "Should mention security/blocked/label: {err}"
+    );
+}
+
+#[test]
+fn test_validate_rejects_blocked_label_case_insensitive() {
+    let node = parse_query("label:Agent-Blocked").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_rejects_negated_blocked_label() {
+    let node = parse_query("-label:agent-blocked").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_rejects_disallowed_operator() {
+    let node = parse_query("filename:secret.pdf").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("filename") || err.contains("supported") || err.contains("allowed"),
+        "Should mention unsupported operator: {err}"
+    );
+}
+
+#[test]
+fn test_validate_allows_valid_operator() {
+    let node = parse_query("from:alice").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_validate_rejects_is_draft() {
+    let node = parse_query("is:draft").unwrap();
+    let allowed = vec!["from", "to", "subject", "is"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_rejects_in_anywhere() {
+    let node = parse_query("in:anywhere").unwrap();
+    let allowed = vec!["from", "to", "subject", "in"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_rejects_in_trash() {
+    let node = parse_query("in:trash").unwrap();
+    let allowed = vec!["from", "to", "subject", "in"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_rejects_in_spam() {
+    let node = parse_query("in:spam").unwrap();
+    let allowed = vec!["from", "to", "subject", "in"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_rejects_excessive_depth() {
+    let deep = "(((((((((((from:alice)))))))))))";
+    let node = parse_query(deep).unwrap();
+    let allowed = vec!["from"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 5);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.to_lowercase().contains("depth") || err.to_lowercase().contains("nesting"),
+        "Should mention depth: {err}"
+    );
+}
+
+#[test]
+fn test_validate_blocked_label_nested_in_or() {
+    let node = parse_query("from:alice OR label:agent-blocked").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_validate_blocked_label_nested_in_group() {
+    let node = parse_query("(label:agent-blocked from:alice)").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_label_operator_always_rejected() {
+    let node = parse_query("label:important").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    let result = validate_query(&node, &allowed, "agent-blocked", 10);
+    assert!(result.is_err());
+}
+
+// --- Reconstruction tests ---
+
+#[test]
+fn test_reconstruct_simple_term() {
+    let node = parse_query("hello").unwrap();
+    assert_eq!(reconstruct_query(&node), "hello");
+}
+
+#[test]
+fn test_reconstruct_operator() {
+    let node = parse_query("from:alice").unwrap();
+    assert_eq!(reconstruct_query(&node), "from:alice");
+}
+
+#[test]
+fn test_reconstruct_quoted() {
+    let node = parse_query(r#""hello world""#).unwrap();
+    assert_eq!(reconstruct_query(&node), r#""hello world""#);
+}
+
+#[test]
+fn test_reconstruct_negated() {
+    let node = parse_query("-from:bob").unwrap();
+    assert_eq!(reconstruct_query(&node), "-from:bob");
+}
+
+#[test]
+fn test_reconstruct_or() {
+    let node = parse_query("from:alice OR from:bob").unwrap();
+    assert_eq!(reconstruct_query(&node), "from:alice OR from:bob");
+}
+
+#[test]
+fn test_reconstruct_group() {
+    let node = parse_query("(from:alice OR from:bob) subject:meeting").unwrap();
+    let result = reconstruct_query(&node);
+    assert!(
+        result.contains("(from:alice OR from:bob)"),
+        "Group should be preserved: {result}"
+    );
+    assert!(
+        result.contains("subject:meeting"),
+        "Operator should be present: {result}"
+    );
+}
+
+#[test]
+fn test_reconstruct_with_label_exclusion() {
+    let node = parse_query("from:alice").unwrap();
+    let result = reconstruct_with_label_exclusion(&node, "agent-blocked");
+    assert_eq!(result, "(from:alice) -label:agent-blocked");
+}
+
+#[test]
+fn test_reconstruct_complex_with_label_exclusion() {
+    let node = parse_query("from:alice OR from:bob").unwrap();
+    let result = reconstruct_with_label_exclusion(&node, "agent-blocked");
+    assert_eq!(result, "(from:alice OR from:bob) -label:agent-blocked");
 }

@@ -455,6 +455,151 @@ impl Parser {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Validate a parsed query AST against security rules.
+///
+/// Rejects queries that reference blocked labels, use disallowed operators,
+/// access drafts/trash/spam, or exceed maximum nesting depth.
+pub fn validate_query(
+    node: &QueryNode,
+    allowed_operators: &[&str],
+    blocked_label: &str,
+    max_depth: usize,
+) -> Result<(), QueryError> {
+    validate_recursive(node, allowed_operators, blocked_label, max_depth, 0)
+}
+
+fn validate_recursive(
+    node: &QueryNode,
+    allowed_operators: &[&str],
+    blocked_label: &str,
+    max_depth: usize,
+    depth: usize,
+) -> Result<(), QueryError> {
+    fn validation_error(message: &str, hint: &str) -> QueryError {
+        QueryError {
+            error: "query_validation_error".into(),
+            message: message.into(),
+            hint: hint.into(),
+            position: None,
+            query: String::new(),
+        }
+    }
+
+    match node {
+        QueryNode::Operator { key, value, .. } => {
+            let key_lower = key.to_lowercase();
+            let value_lower = value.to_lowercase();
+
+            if key_lower == "label" {
+                if value_lower == blocked_label.to_lowercase() {
+                    return Err(validation_error(
+                        "Query references a label used for security filtering",
+                        "Remove the label: operator from your query",
+                    ));
+                }
+                return Err(validation_error(
+                    "The label: operator is not allowed for agents",
+                    "Remove the label: operator from your query",
+                ));
+            }
+
+            if key_lower == "is" && value_lower == "draft" {
+                return Err(validation_error(
+                    "Drafts are not accessible",
+                    "Remove is:draft from your query",
+                ));
+            }
+
+            if key_lower == "in" && matches!(value_lower.as_str(), "anywhere" | "trash" | "spam") {
+                return Err(validation_error(
+                    &format!("The location '{}' is restricted", value),
+                    "Use a different location or remove the in: operator",
+                ));
+            }
+
+            if !allowed_operators.contains(&key_lower.as_str()) {
+                return Err(validation_error(
+                    &format!(
+                        "Operator '{}' is not supported. Supported operators: {}",
+                        key,
+                        allowed_operators.join(", ")
+                    ),
+                    &format!("Use one of: {}", allowed_operators.join(", ")),
+                ));
+            }
+
+            Ok(())
+        }
+        QueryNode::Group(inner) => {
+            if depth >= max_depth {
+                return Err(validation_error(
+                    &format!("Query nesting depth exceeds maximum of {}", max_depth),
+                    "Simplify the query to reduce nesting",
+                ));
+            }
+            validate_recursive(inner, allowed_operators, blocked_label, max_depth, depth + 1)
+        }
+        QueryNode::Not(inner) => {
+            if depth >= max_depth {
+                return Err(validation_error(
+                    &format!("Query nesting depth exceeds maximum of {}", max_depth),
+                    "Simplify the query to reduce nesting",
+                ));
+            }
+            validate_recursive(inner, allowed_operators, blocked_label, max_depth, depth + 1)
+        }
+        QueryNode::And(children) | QueryNode::Or(children) => {
+            if depth >= max_depth {
+                return Err(validation_error(
+                    &format!("Query nesting depth exceeds maximum of {}", max_depth),
+                    "Simplify the query to reduce nesting",
+                ));
+            }
+            for child in children {
+                validate_recursive(child, allowed_operators, blocked_label, max_depth, depth + 1)?;
+            }
+            Ok(())
+        }
+        QueryNode::Term(_) | QueryNode::Quoted(_) => Ok(()),
+    }
+}
+
+/// Serialize a query AST back into a Gmail query string.
+pub fn reconstruct_query(node: &QueryNode) -> String {
+    match node {
+        QueryNode::Term(s) => s.clone(),
+        QueryNode::Quoted(s) => format!("\"{}\"", s),
+        QueryNode::Operator { key, value, negated } => {
+            let prefix = if *negated { "-" } else { "" };
+            if value.contains(' ') {
+                format!("{}{}:\"{}\"", prefix, key, value)
+            } else {
+                format!("{}{}:{}", prefix, key, value)
+            }
+        }
+        QueryNode::Not(inner) => format!("-{}", reconstruct_query(inner)),
+        QueryNode::Group(inner) => format!("({})", reconstruct_query(inner)),
+        QueryNode::And(children) => children
+            .iter()
+            .map(|c| reconstruct_query(c))
+            .collect::<Vec<_>>()
+            .join(" "),
+        QueryNode::Or(children) => children
+            .iter()
+            .map(|c| reconstruct_query(c))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    }
+}
+
+/// Reconstruct a query with a label exclusion appended.
+///
+/// Wraps the user query in a group and adds `-label:{label}` to ensure
+/// the blocked label is excluded from results.
+pub fn reconstruct_with_label_exclusion(node: &QueryNode, label: &str) -> String {
+    format!("({}) -label:{}", reconstruct_query(node), label)
+}
+
 /// Parse a Gmail search query string into an AST.
 ///
 /// Returns a `QueryError` if the query is invalid, empty, or exceeds the
