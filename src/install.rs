@@ -267,7 +267,33 @@ fn run_user_install() -> Result<()> {
         write_always(&unit_path, USER_SYSTEMD_UNIT, "systemd user unit")?;
     }
 
+    // 4. Check if ~/.local/bin is in PATH
+    let bin_dir = home.join(".local/bin");
+    let bin_dir_str = bin_dir.display().to_string();
+    let in_path = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .any(|p| p == bin_dir_str || p == "~/.local/bin" || p == "$HOME/.local/bin");
+
     println!("\nInstallation complete!");
+
+    if !in_path {
+        let shell_rc = if cfg!(target_os = "macos") {
+            "~/.zshrc"
+        } else if std::env::var("SHELL").unwrap_or_default().contains("zsh") {
+            "~/.zshrc"
+        } else {
+            "~/.bashrc"
+        };
+
+        println!();
+        println!("  Note: {} is not in your PATH. Add it with:", bin_dir.display());
+        println!("    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> {shell_rc}");
+        println!();
+        println!("  Then either restart your shell or run:");
+        println!("    source {shell_rc}");
+    }
+
     println!("\nNext steps:");
     println!("  1. Edit {}", config_path.display());
     println!("  2. Run: gmail-proxy setup");
