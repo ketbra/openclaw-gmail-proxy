@@ -6,10 +6,11 @@ use clap::{Parser, Subcommand};
 use tokio::sync::RwLock;
 
 use gmail_proxy::audit::AuditLogger;
-use gmail_proxy::auth::TokenManager;
+use gmail_proxy::auth::{TokenManager, run_oauth_setup};
 use gmail_proxy::config;
 use gmail_proxy::gmail::client::GmailClient;
 use gmail_proxy::gmail::watch::WatchManager;
+use gmail_proxy::install;
 use gmail_proxy::poller::processor::Processor;
 use gmail_proxy::poller::pubsub::PubSubClient;
 use gmail_proxy::proxy::routes::{
@@ -17,6 +18,8 @@ use gmail_proxy::proxy::routes::{
 };
 use gmail_proxy::scrub::content::ContentScrubber;
 use gmail_proxy::scrub::labels::LabelFilter;
+
+const SKILL_CONTENT: &str = include_str!("../skill/SKILL.md");
 
 #[derive(Parser)]
 #[command(name = "gmail-proxy", about = "Secure Gmail proxy for OpenClaw")]
@@ -67,23 +70,23 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Install {
-            system: _,
-            service_user: _,
+            system,
+            service_user,
         } => {
-            eprintln!("install: not yet implemented");
+            install::run_install(system, &service_user)?;
         }
         Command::Setup {
-            config: _,
-            client_json: _,
-            service_user: _,
+            config,
+            client_json,
+            service_user,
         } => {
-            eprintln!("setup: not yet implemented");
+            run_oauth_setup(config, client_json, service_user).await?;
         }
         Command::Serve { config } => {
             serve(config).await?;
         }
-        Command::InstallSkill { workspace: _ } => {
-            eprintln!("install-skill: not yet implemented");
+        Command::InstallSkill { workspace } => {
+            install_skill(workspace)?;
         }
     }
     Ok(())
@@ -281,4 +284,52 @@ async fn shutdown_signal() {
         .await
         .expect("Failed to install CTRL+C handler");
     tracing::info!("Received shutdown signal");
+}
+
+fn install_skill(workspace: Option<PathBuf>) -> anyhow::Result<()> {
+    // 1. If --workspace provided, use that
+    // 2. Else check ~/.openclaw/workspace
+    // 3. Else check $OPENCLAW_WORKSPACE env var
+    // 4. If found: write to {workspace}/skills/gmail-proxy/SKILL.md
+    // 5. If not found: print to stdout
+
+    let workspace_dir = if let Some(ws) = workspace {
+        Some(ws)
+    } else {
+        let home_workspace = dirs::home_dir()
+            .map(|h| h.join(".openclaw").join("workspace"));
+        if let Some(ref p) = home_workspace {
+            if p.is_dir() {
+                home_workspace
+            } else {
+                std::env::var("OPENCLAW_WORKSPACE")
+                    .ok()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_dir())
+            }
+        } else {
+            std::env::var("OPENCLAW_WORKSPACE")
+                .ok()
+                .map(PathBuf::from)
+                .filter(|p| p.is_dir())
+        }
+    };
+
+    match workspace_dir {
+        Some(ws) => {
+            let skill_dir = ws.join("skills").join("gmail-proxy");
+            std::fs::create_dir_all(&skill_dir)
+                .with_context(|| format!("failed to create {}", skill_dir.display()))?;
+            let skill_path = skill_dir.join("SKILL.md");
+            std::fs::write(&skill_path, SKILL_CONTENT)
+                .with_context(|| format!("failed to write {}", skill_path.display()))?;
+            println!("Installed skill to {}", skill_path.display());
+        }
+        None => {
+            // No workspace found — print to stdout
+            print!("{SKILL_CONTENT}");
+        }
+    }
+
+    Ok(())
 }
