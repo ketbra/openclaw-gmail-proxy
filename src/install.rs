@@ -35,7 +35,7 @@ url_strip_patterns = [
 ]
 allowed_operators = [
   "from", "to", "cc", "bcc", "subject",
-  "has", "filename", "list", "deliveredto",
+  "has", "is", "in", "filename", "list", "deliveredto",
   "newer_than", "older_than", "after", "before",
   "category", "size", "larger", "smaller",
   "rfc822msgid",
