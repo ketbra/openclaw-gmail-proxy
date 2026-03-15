@@ -390,7 +390,7 @@ fn nix_is_root() -> bool {
 
 fn create_service_user(service_user: &str) -> Result<()> {
     if cfg!(target_os = "macos") {
-        // macOS: use dscl to check/create
+        // macOS: use dscl to check/create user and group
         let check = std::process::Command::new("dscl")
             .args([".", "-read", &format!("/Users/{service_user}")])
             .output();
@@ -400,27 +400,43 @@ fn create_service_user(service_user: &str) -> Result<()> {
             }
             _ => {
                 println!("  Creating service user '{service_user}' via dscl...");
-                // Find next available UID in the service range
-                let result = std::process::Command::new("dscl")
-                    .args([
-                        ".", "-create", &format!("/Users/{service_user}"),
-                    ])
-                    .status();
-                match result {
-                    Ok(s) if s.success() => {
-                        // Set shell to nologin
-                        let _ = std::process::Command::new("dscl")
-                            .args([".", "-create", &format!("/Users/{service_user}"), "UserShell", "/usr/bin/false"])
-                            .status();
-                        let _ = std::process::Command::new("dscl")
-                            .args([".", "-create", &format!("/Users/{service_user}"), "RealName", "Gmail Proxy Service"])
-                            .status();
-                        println!("  Created service user '{service_user}'");
+
+                // Find an available UID/GID in the 400-499 range (macOS service accounts)
+                let uid = find_available_macos_id();
+                let uid_str = uid.to_string();
+                let user_path = format!("/Users/{service_user}");
+                let group_path = format!("/Groups/{service_user}");
+
+                // Create the group first
+                let cmds: Vec<(&str, Vec<&str>)> = vec![
+                    ("dscl", vec![".", "-create", &group_path]),
+                    ("dscl", vec![".", "-create", &group_path, "PrimaryGroupID", &uid_str]),
+                    ("dscl", vec![".", "-create", &group_path, "RealName", "Gmail Proxy Service"]),
+                    ("dscl", vec![".", "-create", &group_path, "Password", "*"]),
+                    // Create the user
+                    ("dscl", vec![".", "-create", &user_path]),
+                    ("dscl", vec![".", "-create", &user_path, "UniqueID", &uid_str]),
+                    ("dscl", vec![".", "-create", &user_path, "PrimaryGroupID", &uid_str]),
+                    ("dscl", vec![".", "-create", &user_path, "UserShell", "/usr/bin/false"]),
+                    ("dscl", vec![".", "-create", &user_path, "RealName", "Gmail Proxy Service"]),
+                    ("dscl", vec![".", "-create", &user_path, "NFSHomeDirectory", "/var/empty"]),
+                    ("dscl", vec![".", "-create", &user_path, "Password", "*"]),
+                ];
+
+                let mut ok = true;
+                for (cmd, args) in &cmds {
+                    let result = std::process::Command::new(cmd).args(args).status();
+                    if !matches!(result, Ok(s) if s.success()) {
+                        ok = false;
+                        break;
                     }
-                    _ => {
-                        eprintln!("  Warning: failed to create service user '{service_user}'");
-                        eprintln!("  You may need to create it manually");
-                    }
+                }
+
+                if ok {
+                    println!("  Created service user and group '{service_user}' (UID/GID {uid})");
+                } else {
+                    eprintln!("  Warning: failed to fully create service user '{service_user}'");
+                    eprintln!("  You may need to create it manually via System Settings or dscl");
                 }
             }
         }
@@ -459,9 +475,41 @@ fn create_service_user(service_user: &str) -> Result<()> {
     Ok(())
 }
 
+/// Find an available UID/GID in the 400-499 range for macOS service accounts.
+fn find_available_macos_id() -> u32 {
+    for id in 400..500 {
+        // Check if UID is taken
+        let uid_check = std::process::Command::new("dscl")
+            .args([".", "-search", "/Users", "UniqueID", &id.to_string()])
+            .output();
+        let uid_taken = uid_check
+            .as_ref()
+            .map(|o| !o.stdout.is_empty() && o.stdout != b"\n")
+            .unwrap_or(false);
+
+        // Check if GID is taken
+        let gid_check = std::process::Command::new("dscl")
+            .args([".", "-search", "/Groups", "PrimaryGroupID", &id.to_string()])
+            .output();
+        let gid_taken = gid_check
+            .as_ref()
+            .map(|o| !o.stdout.is_empty() && o.stdout != b"\n")
+            .unwrap_or(false);
+
+        if !uid_taken && !gid_taken {
+            return id;
+        }
+    }
+    // Fallback — unlikely to get here
+    450
+}
+
 fn chown_dir(path: &Path, user: &str) {
+    // On macOS, use user:user since we create a matching group.
+    // On Linux, useradd --system also creates a matching group.
+    let ownership = format!("{user}:{user}");
     let status = std::process::Command::new("chown")
-        .args(["-R", &format!("{user}:{user}"), &path.display().to_string()])
+        .args(["-R", &ownership, &path.display().to_string()])
         .status();
     match status {
         Ok(s) if s.success() => {
@@ -469,7 +517,7 @@ fn chown_dir(path: &Path, user: &str) {
         }
         _ => {
             eprintln!("  Warning: could not chown {}. Run manually:", path.display());
-            eprintln!("    chown -R {user}:{user} {}", path.display());
+            eprintln!("    chown -R {ownership} {}", path.display());
         }
     }
 }
