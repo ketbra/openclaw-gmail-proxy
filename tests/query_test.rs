@@ -399,3 +399,188 @@ fn test_reconstruct_complex_with_label_exclusion() {
     let result = reconstruct_with_label_exclusion(&node, "agent-blocked");
     assert_eq!(result, "(from:alice OR from:bob) -label:agent-blocked");
 }
+
+// --- Security edge cases ---
+
+#[test]
+fn test_or_precedence_does_not_bypass_filter() {
+    let node = parse_query("from:alice OR from:bob").unwrap();
+    let allowed = vec!["from"];
+    validate_query(&node, &allowed, "agent-blocked", 10).unwrap();
+    let result = reconstruct_with_label_exclusion(&node, "agent-blocked");
+    // The exclusion must be outside the OR group
+    assert!(result.starts_with("("), "User query should be grouped: {result}");
+    assert!(result.ends_with("-label:agent-blocked"), "Exclusion at end: {result}");
+}
+
+#[test]
+fn test_double_negation_blocked_label() {
+    // --label:agent-blocked — still references the blocked label
+    let result = parse_query("--label:agent-blocked");
+    // Either parse error or if it parses, validation should still reject
+    if let Ok(node) = result {
+        let allowed = vec!["from"];
+        let validation = validate_query(&node, &allowed, "agent-blocked", 10);
+        assert!(validation.is_err(), "Double negation of blocked label must be rejected");
+    }
+}
+
+#[test]
+fn test_blocked_label_with_different_case() {
+    for label_form in &["Agent-Blocked", "AGENT-BLOCKED", "agent-BLOCKED", "aGeNt-bLoCkEd"] {
+        let query = format!("label:{}", label_form);
+        let node = parse_query(&query).unwrap();
+        let allowed = vec!["from"];
+        let result = validate_query(&node, &allowed, "agent-blocked", 10);
+        assert!(result.is_err(), "Should reject label:{label_form}");
+    }
+}
+
+#[test]
+fn test_nested_groups_with_or() {
+    let node = parse_query("((from:alice OR to:bob) (subject:meeting OR subject:call))").unwrap();
+    let allowed = vec!["from", "to", "subject"];
+    validate_query(&node, &allowed, "agent-blocked", 10).unwrap();
+    let result = reconstruct_with_label_exclusion(&node, "agent-blocked");
+    assert!(result.contains("-label:agent-blocked"));
+}
+
+#[test]
+fn test_curly_braces_validated_same_as_parens() {
+    let node = parse_query("{from:alice from:bob}").unwrap();
+    let allowed = vec!["from"];
+    validate_query(&node, &allowed, "agent-blocked", 10).unwrap();
+    let result = reconstruct_query(&node);
+    assert!(!result.is_empty());
+}
+
+#[test]
+fn test_reconstruct_roundtrip() {
+    let queries = vec![
+        "from:alice",
+        r#"subject:"hello world""#,
+        "from:alice OR from:bob",
+        "(from:alice OR from:bob) subject:meeting",
+        "-from:noreply",
+        "invoice has:attachment newer_than:7d",
+    ];
+    for q in queries {
+        let node = parse_query(q).unwrap();
+        let reconstructed = reconstruct_query(&node);
+        let reparsed = parse_query(&reconstructed).unwrap();
+        assert_eq!(node, reparsed, "Roundtrip failed for: {q} -> {reconstructed}");
+    }
+}
+
+#[test]
+fn test_or_between_groups() {
+    let node = parse_query("(from:a from:b) OR (from:c from:d)").unwrap();
+    match &node {
+        QueryNode::Or(children) => {
+            assert_eq!(children.len(), 2);
+            for child in children {
+                match child {
+                    QueryNode::Group(_) => {}
+                    other => panic!("Expected Group child in Or, got {other:?}"),
+                }
+            }
+        }
+        other => panic!("Expected Or, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_negated_group() {
+    let node = parse_query("-(from:alice OR from:bob)").unwrap();
+    match &node {
+        QueryNode::Not(inner) => match inner.as_ref() {
+            QueryNode::Group(_) => {}
+            other => panic!("Expected Group inside Not, got {other:?}"),
+        },
+        other => panic!("Expected Not, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_operator_with_slash_in_value() {
+    // Date values like after:2026/01/01
+    let node = parse_query("after:2026/01/01").unwrap();
+    match node {
+        QueryNode::Operator { key, value, .. } => {
+            assert_eq!(key, "after");
+            assert_eq!(value, "2026/01/01");
+        }
+        other => panic!("Expected Operator, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_operator_with_at_sign_in_value() {
+    let node = parse_query("from:alice@example.com").unwrap();
+    match node {
+        QueryNode::Operator { key, value, .. } => {
+            assert_eq!(key, "from");
+            assert_eq!(value, "alice@example.com");
+        }
+        other => panic!("Expected Operator, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_has_attachment_operator() {
+    let node = parse_query("has:attachment").unwrap();
+    match node {
+        QueryNode::Operator { key, value, .. } => {
+            assert_eq!(key, "has");
+            assert_eq!(value, "attachment");
+        }
+        other => panic!("Expected Operator, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_newer_than_relative_time() {
+    let node = parse_query("newer_than:7d").unwrap();
+    match node {
+        QueryNode::Operator { key, value, .. } => {
+            assert_eq!(key, "newer_than");
+            assert_eq!(value, "7d");
+        }
+        other => panic!("Expected Operator, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_complex_real_world_query() {
+    // A realistic agent query
+    let q = r#"from:amazon subject:"order confirmation" newer_than:30d has:attachment"#;
+    let node = parse_query(q).unwrap();
+    let allowed = vec!["from", "subject", "newer_than", "has"];
+    validate_query(&node, &allowed, "agent-blocked", 10).unwrap();
+    let secured = reconstruct_with_label_exclusion(&node, "agent-blocked");
+    assert!(secured.contains("-label:agent-blocked"));
+    assert!(secured.starts_with("("));
+}
+
+#[test]
+fn test_is_unread_allowed() {
+    let node = parse_query("is:unread").unwrap();
+    let allowed = vec!["from", "is"];
+    validate_query(&node, &allowed, "agent-blocked", 10).unwrap();
+}
+
+#[test]
+fn test_is_starred_allowed() {
+    let node = parse_query("is:starred").unwrap();
+    let allowed = vec!["from", "is"];
+    validate_query(&node, &allowed, "agent-blocked", 10).unwrap();
+}
+
+#[test]
+fn test_multiple_spaces_between_terms() {
+    let node = parse_query("from:alice    to:bob").unwrap();
+    match node {
+        QueryNode::And(children) => assert_eq!(children.len(), 2),
+        other => panic!("Expected And, got {other:?}"),
+    }
+}
