@@ -111,16 +111,16 @@ const LAUNCHAGENT_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"
         <string>HOME/.local/bin/gmail-proxy</string>
         <string>serve</string>
         <string>--config</string>
-        <string>HOME/.config/gmail-proxy/config.toml</string>
+        <string>CONFIG_DIR/config.toml</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>HOME/.local/share/gmail-proxy/stdout.log</string>
+    <string>DATA_DIR/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>HOME/.local/share/gmail-proxy/stderr.log</string>
+    <string>DATA_DIR/stderr.log</string>
 </dict>
 </plist>
 "#;
@@ -221,11 +221,24 @@ fn run_user_install() -> Result<()> {
     let bin_path = home.join(".local/bin/gmail-proxy");
     copy_binary(&bin_path)?;
 
-    // 2. Create config directory and template config
-    let config_dir = home.join(".config/gmail-proxy");
-    std::fs::create_dir_all(&config_dir)?;
+    // 2. Resolve platform-native directories
+    let config_dir = dirs::config_dir()
+        .unwrap_or_else(|| home.join(".config"))
+        .join("gmail-proxy");
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("gmail-proxy");
 
-    let data_dir = home.join(".local/share/gmail-proxy");
+    // On macOS these resolve to:
+    //   config: ~/Library/Application Support/gmail-proxy/
+    //   data:   ~/Library/Application Support/gmail-proxy/
+    // On Linux (XDG):
+    //   config: ~/.config/gmail-proxy/
+    //   data:   ~/.local/share/gmail-proxy/
+
+    std::fs::create_dir_all(&config_dir)?;
+    println!("  Created {}", config_dir.display());
+
     std::fs::create_dir_all(&data_dir)?;
     println!("  Created {}", data_dir.display());
 
@@ -239,7 +252,12 @@ fn run_user_install() -> Result<()> {
         std::fs::create_dir_all(&plist_dir)?;
         let plist_path = plist_dir.join("com.gmail-proxy.plist");
         let home_str = home.display().to_string();
-        let plist_content = LAUNCHAGENT_PLIST_TEMPLATE.replace("HOME", &home_str);
+        let config_dir_str = config_dir.display().to_string();
+        let data_dir_str = data_dir.display().to_string();
+        let plist_content = LAUNCHAGENT_PLIST_TEMPLATE
+            .replace("HOME", &home_str)
+            .replace("CONFIG_DIR", &config_dir_str)
+            .replace("DATA_DIR", &data_dir_str);
         write_always(&plist_path, &plist_content, "LaunchAgent plist")?;
     } else {
         // Linux: user-level systemd
@@ -253,7 +271,9 @@ fn run_user_install() -> Result<()> {
     println!("\nNext steps:");
     println!("  1. Edit {}", config_path.display());
     println!("  2. Run: gmail-proxy setup");
-    if !cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") {
+        println!("  3. Start: launchctl load ~/Library/LaunchAgents/com.gmail-proxy.plist");
+    } else {
         println!("  3. Enable service: systemctl --user enable --now gmail-proxy");
     }
 
