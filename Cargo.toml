@@ -1,0 +1,28 @@
+[package]
+name = "gmail-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+open = "5"
+anyhow = "1"
+rand = "0.9"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
