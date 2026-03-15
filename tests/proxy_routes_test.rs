@@ -79,13 +79,13 @@ async fn setup_test_app() -> (axum::Router, MockServer) {
         "cid".into(), "csecret".into(), "refresh".into(),
         format!("{}/token", mock_server.uri()),
     ));
-    let gmail = GmailClient::new(
+    let gmail = Arc::new(GmailClient::new(
         token_manager.clone(),
         format!("{}/gmail/v1/users/me", mock_server.uri()),
-    );
-    let label_filter = LabelFilter::new("Label_42".into(), "agent-blocked".into());
-    let scrubber = ContentScrubber::new(vec![], vec![], vec![], false);
-    let audit = AuditLogger::new(audit_dir.path()).unwrap();
+    ));
+    let label_filter = Arc::new(LabelFilter::new("Label_42".into(), "agent-blocked".into()));
+    let scrubber = Arc::new(ContentScrubber::new(vec![], vec![], vec![], false));
+    let audit = Arc::new(AuditLogger::new(audit_dir.path()).unwrap());
 
     let state = Arc::new(AppState {
         gmail,

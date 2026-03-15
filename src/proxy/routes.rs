@@ -28,10 +28,10 @@ pub struct WatchStatus {
 }
 
 pub struct AppState {
-    pub gmail: GmailClient,
-    pub label_filter: LabelFilter,
-    pub scrubber: ContentScrubber,
-    pub audit: AuditLogger,
+    pub gmail: Arc<GmailClient>,
+    pub label_filter: Arc<LabelFilter>,
+    pub scrubber: Arc<ContentScrubber>,
+    pub audit: Arc<AuditLogger>,
     pub allowed_operators: Vec<String>,
     pub blocked_label: String,
     pub max_query_depth: usize,
