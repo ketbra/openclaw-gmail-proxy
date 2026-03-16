@@ -33,6 +33,7 @@ hook_url = "https://openclaw.example.com/hook"
 
 [audit]
 log_dir = "audit_logs"
+state_dir = "state"
 "#
 }
 
@@ -120,6 +121,7 @@ hook_url = "https://example.com/hook"
 
 [audit]
 log_dir = "logs"
+state_dir = "state"
 "#;
 
     fs::write(&config_path, incomplete_config).unwrap();
@@ -171,6 +173,7 @@ hook_url = "https://example.com/hook"
 
 [audit]
 log_dir = "logs"
+state_dir = "state"
 "#;
 
     fs::write(&config_path, config_with_bad_regex).unwrap();

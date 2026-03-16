@@ -42,6 +42,7 @@ pub struct OpenClawConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuditConfig {
     pub log_dir: String,
+    pub state_dir: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -153,7 +154,7 @@ pub fn resolve_paths(config_path: &Path, config: &Config) -> Paths {
     Paths {
         config: config_path.to_path_buf(),
         secrets: config_dir.join(&config.auth.secrets_file),
-        state: config_dir.join("state.json"),
-        audit_dir: config_dir.join(&config.audit.log_dir),
+        state: PathBuf::from(&config.audit.state_dir).join("state.json"),
+        audit_dir: PathBuf::from(&config.audit.log_dir),
     }
 }

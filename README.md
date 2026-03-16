@@ -262,6 +262,7 @@ hook_url = "http://127.0.0.1:18789/hooks/gmail"
 
 [audit]
 log_dir = "/var/log/gmail-proxy"
+state_dir = "/var/lib/gmail-proxy"
 ```
 
 All scrubbing patterns are configurable regex. Add patterns for your environment as needed.

@@ -50,6 +50,7 @@ hook_url = "http://127.0.0.1:18789/hooks/gmail"
 
 [audit]
 log_dir = "LOG_DIR_PLACEHOLDER"
+state_dir = "STATE_DIR_PLACEHOLDER"
 "#;
 
 const USER_SYSTEMD_UNIT: &str = r#"[Unit]
@@ -242,7 +243,10 @@ fn run_user_install() -> Result<()> {
     std::fs::create_dir_all(&data_dir)?;
     println!("  Created {}", data_dir.display());
 
-    let config_content = TEMPLATE_CONFIG.replace("LOG_DIR_PLACEHOLDER", &data_dir.display().to_string());
+    let data_dir_str = data_dir.display().to_string();
+    let config_content = TEMPLATE_CONFIG
+        .replace("LOG_DIR_PLACEHOLDER", &data_dir_str)
+        .replace("STATE_DIR_PLACEHOLDER", &data_dir_str);
     let config_path = config_dir.join("config.toml");
     write_if_not_exists(&config_path, &config_content, "config.toml")?;
 
@@ -334,7 +338,9 @@ fn run_system_install(service_user: &str) -> Result<()> {
         std::fs::create_dir_all(log_dir)?;
 
         // Config file
-        let config_content = TEMPLATE_CONFIG.replace("LOG_DIR_PLACEHOLDER", "/var/log/gmail-proxy");
+        let config_content = TEMPLATE_CONFIG
+            .replace("LOG_DIR_PLACEHOLDER", "/var/log/gmail-proxy")
+            .replace("STATE_DIR_PLACEHOLDER", "/var/lib/gmail-proxy");
         write_if_not_exists(&config_dir.join("config.toml"), &config_content, "config.toml")?;
 
         // Set ownership on state/log dirs
@@ -354,7 +360,9 @@ fn run_system_install(service_user: &str) -> Result<()> {
         let log_dir = Path::new("/var/log/gmail-proxy");
         std::fs::create_dir_all(log_dir)?;
 
-        let config_content = TEMPLATE_CONFIG.replace("LOG_DIR_PLACEHOLDER", "/var/log/gmail-proxy");
+        let config_content = TEMPLATE_CONFIG
+            .replace("LOG_DIR_PLACEHOLDER", "/var/log/gmail-proxy")
+            .replace("STATE_DIR_PLACEHOLDER", "/var/lib/gmail-proxy");
         write_if_not_exists(&config_dir.join("config.toml"), &config_content, "config.toml")?;
 
         chown_dir(state_dir, service_user);
