@@ -9,14 +9,14 @@ description: >
 
 # Gmail Proxy
 
-Read-only email access via a local security proxy running at `http://127.0.0.1:8780`.
-The proxy enforces label-based filtering and content scrubbing. You cannot send,
-delete, or modify any email through this interface.
+Read-only email access via a local security proxy listening on a Unix domain socket
+at `/var/run/gmail-proxy/proxy.sock`. The proxy enforces label-based filtering and
+content scrubbing. You cannot send, delete, or modify any email through this interface.
 
 ## Search emails
 
 ```bash
-curl -s 'http://127.0.0.1:8780/search?q=QUERY&max=N'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock 'http://localhost/search?q=QUERY&max=N'
 ```
 
 - `q`: Gmail search query (URL-encoded)
@@ -59,13 +59,13 @@ and adjust your query accordingly.
 
 ```bash
 # Recent unread
-curl -s 'http://127.0.0.1:8780/search?q=is:unread+newer_than:1d&max=10'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock 'http://localhost/search?q=is:unread+newer_than:1d&max=10'
 
 # From a specific sender
-curl -s 'http://127.0.0.1:8780/search?q=from:jane@example.com&max=5'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock 'http://localhost/search?q=from:jane@example.com&max=5'
 
 # Keyword search
-curl -s 'http://127.0.0.1:8780/search?q=project+proposal+has:attachment&max=10'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock 'http://localhost/search?q=project+proposal+has:attachment&max=10'
 ```
 
 ### Pagination
@@ -75,11 +75,11 @@ To get the next page, pass it back:
 
 ```bash
 # First page
-curl -s 'http://127.0.0.1:8780/search?q=from:amazon&max=20'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock 'http://localhost/search?q=from:amazon&max=20'
 # Response includes: "next_page_token": "abc123..."
 
 # Next page
-curl -s 'http://127.0.0.1:8780/search?q=from:amazon&max=20&page_token=abc123...'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock 'http://localhost/search?q=from:amazon&max=20&page_token=abc123...'
 ```
 
 Keep paging until `next_page_token` is null. The `result_size_estimate` field
@@ -88,7 +88,7 @@ gives an approximate total count.
 ## Read a single message
 
 ```bash
-curl -s 'http://127.0.0.1:8780/message/MESSAGE_ID'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock http://localhost/message/MESSAGE_ID
 ```
 
 - Returns: single message object with full `body_text`
@@ -96,7 +96,7 @@ curl -s 'http://127.0.0.1:8780/message/MESSAGE_ID'
 ## Read a thread
 
 ```bash
-curl -s 'http://127.0.0.1:8780/thread/THREAD_ID'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock http://localhost/thread/THREAD_ID
 ```
 
 - Returns: JSON object with `thread_id` and `messages` array, ordered chronologically
@@ -104,7 +104,7 @@ curl -s 'http://127.0.0.1:8780/thread/THREAD_ID'
 ## Check proxy health
 
 ```bash
-curl -s 'http://127.0.0.1:8780/health'
+curl -s --unix-socket /var/run/gmail-proxy/proxy.sock http://localhost/health
 ```
 
 - Returns: watch status, token freshness, poller status
