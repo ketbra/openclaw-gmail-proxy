@@ -30,14 +30,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install binary and service configuration
+    /// Install binary and service configuration (requires sudo)
     Install {
-        /// System-level install (requires sudo)
+        /// Service user that runs the proxy (e.g. _gmail_proxy)
         #[arg(long)]
-        system: bool,
-        /// Service user name
-        #[arg(long, default_value = "gmail-proxy")]
         service_user: String,
+        /// User that runs OpenClaw (needs socket access)
+        #[arg(long)]
+        openclaw_user: String,
     },
     /// Interactive OAuth setup (opens browser)
     Setup {
@@ -70,10 +70,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Install {
-            system,
             service_user,
+            openclaw_user,
         } => {
-            install::run_install(system, &service_user)?;
+            install::run_install(&service_user, &openclaw_user)?;
         }
         Command::Setup {
             config,
@@ -269,6 +269,17 @@ async fn serve(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let listener = tokio::net::UnixListener::bind(socket_path)
         .context(format!("Failed to bind Unix socket at {}", socket_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            socket_path,
+            std::fs::Permissions::from_mode(0o660),
+        ).context("Failed to set socket permissions to 0660")?;
+        tracing::info!("Socket permissions set to 0660");
+    }
+
     tracing::info!("Proxy API listening on {}", socket_path.display());
 
     // 15. Run everything concurrently with graceful shutdown

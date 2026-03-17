@@ -49,23 +49,8 @@ search_fetch_concurrency = 10
 hook_url = "http://127.0.0.1:18789/hooks/gmail-proxy"
 
 [audit]
-log_dir = "LOG_DIR_PLACEHOLDER"
-state_dir = "STATE_DIR_PLACEHOLDER"
-"#;
-
-const USER_SYSTEMD_UNIT: &str = r#"[Unit]
-Description=Gmail Proxy for OpenClaw
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=%h/.local/bin/gmail-proxy serve --config %h/.config/gmail-proxy/config.toml
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
+log_dir = "/var/log/gmail-proxy"
+state_dir = "/var/lib/gmail-proxy"
 "#;
 
 const SYSTEM_SYSTEMD_UNIT: &str = r#"[Unit]
@@ -101,31 +86,6 @@ ReadOnlyPaths=/etc/gmail-proxy/config.toml
 WantedBy=multi-user.target
 "#;
 
-const LAUNCHAGENT_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.gmail-proxy</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>HOME/.local/bin/gmail-proxy</string>
-        <string>serve</string>
-        <string>--config</string>
-        <string>CONFIG_DIR/config.toml</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>DATA_DIR/stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>DATA_DIR/stderr.log</string>
-</dict>
-</plist>
-"#;
-
 const LAUNCHDAEMON_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -155,21 +115,80 @@ const LAUNCHDAEMON_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8
 </plist>
 "#;
 
-/// Run the install subcommand.
-pub fn run_install(system: bool, service_user: &str) -> Result<()> {
-    if system {
-        run_system_install(service_user)
-    } else {
-        run_user_install()
+/// Run the install subcommand. Requires root.
+pub fn run_install(service_user: &str, openclaw_user: &str) -> Result<()> {
+    println!("Installing gmail-proxy (system-level)...\n");
+
+    // 1. Check for root
+    #[cfg(unix)]
+    {
+        if !nix_is_root() {
+            anyhow::bail!("Install requires root. Run with sudo.");
+        }
     }
+
+    // 2. Copy binary
+    let bin_path = Path::new("/usr/local/bin/gmail-proxy");
+    copy_binary(bin_path)?;
+
+    // 3. Create service user + matching group
+    create_service_user(service_user)?;
+
+    // 4. Add openclaw_user to service user's group
+    add_user_to_group(openclaw_user, service_user)?;
+
+    // 5. Create directories
+    let config_dir = Path::new("/etc/gmail-proxy");
+    std::fs::create_dir_all(config_dir)?;
+    println!("  Created {}", config_dir.display());
+
+    let state_dir = Path::new("/var/lib/gmail-proxy");
+    std::fs::create_dir_all(state_dir)?;
+    chown_dir(state_dir, service_user);
+    set_dir_mode(state_dir, "0700");
+
+    let log_dir = Path::new("/var/log/gmail-proxy");
+    std::fs::create_dir_all(log_dir)?;
+    chown_dir(log_dir, service_user);
+    set_dir_mode(log_dir, "0700");
+
+    setup_socket_dir(service_user)?;
+
+    // 6. Write template config.toml (if not exists)
+    let config_path = config_dir.join("config.toml");
+    write_if_not_exists(&config_path, TEMPLATE_CONFIG, "config.toml")?;
+
+    // 7. Install service file
+    if cfg!(target_os = "macos") {
+        let plist_path = Path::new("/Library/LaunchDaemons/com.gmail-proxy.plist");
+        let plist_content = LAUNCHDAEMON_PLIST_TEMPLATE.replace("SERVICE_USER", service_user);
+        write_always(plist_path, &plist_content, "LaunchDaemon plist")?;
+    } else {
+        let unit_content = SYSTEM_SYSTEMD_UNIT.replace("SERVICE_USER", service_user);
+        let unit_path = Path::new("/etc/systemd/system/gmail-proxy.service");
+        write_always(unit_path, &unit_content, "systemd unit")?;
+        println!("  Run: systemctl daemon-reload");
+    }
+
+    // 8. Print next steps
+    println!("\nInstallation complete!");
+    println!("\nNext steps:");
+    println!("  1. Edit /etc/gmail-proxy/config.toml");
+    println!(
+        "  2. Run: gmail-proxy setup --service-user {service_user} --openclaw-user {openclaw_user} --client-json /path/to/client_secret.json"
+    );
+    println!("  3. Start the service:");
+    if cfg!(target_os = "macos") {
+        println!("     macOS: sudo launchctl load /Library/LaunchDaemons/com.gmail-proxy.plist");
+    } else {
+        println!("     Linux: sudo systemctl enable --now gmail-proxy");
+    }
+
+    Ok(())
 }
 
 fn current_exe_path() -> Result<PathBuf> {
     std::env::current_exe().context("failed to determine current executable path")
-}
-
-fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().context("could not determine home directory")
 }
 
 fn copy_binary(dest: &Path) -> Result<()> {
@@ -213,180 +232,7 @@ fn write_always(path: &Path, content: &str, description: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_user_install() -> Result<()> {
-    let home = home_dir()?;
-
-    println!("Installing gmail-proxy (user-level)...\n");
-
-    // 1. Copy binary
-    let bin_path = home.join(".local/bin/gmail-proxy");
-    copy_binary(&bin_path)?;
-
-    // 2. Resolve platform-native directories
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| home.join(".config"))
-        .join("gmail-proxy");
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(|| home.join(".local/share"))
-        .join("gmail-proxy");
-
-    // On macOS these resolve to:
-    //   config: ~/Library/Application Support/gmail-proxy/
-    //   data:   ~/Library/Application Support/gmail-proxy/
-    // On Linux (XDG):
-    //   config: ~/.config/gmail-proxy/
-    //   data:   ~/.local/share/gmail-proxy/
-
-    std::fs::create_dir_all(&config_dir)?;
-    println!("  Created {}", config_dir.display());
-
-    std::fs::create_dir_all(&data_dir)?;
-    println!("  Created {}", data_dir.display());
-
-    let data_dir_str = data_dir.display().to_string();
-    let config_content = TEMPLATE_CONFIG
-        .replace("LOG_DIR_PLACEHOLDER", &data_dir_str)
-        .replace("STATE_DIR_PLACEHOLDER", &data_dir_str);
-    let config_path = config_dir.join("config.toml");
-    write_if_not_exists(&config_path, &config_content, "config.toml")?;
-
-    // 3. Platform-specific service file
-    if cfg!(target_os = "macos") {
-        let plist_dir = home.join("Library/LaunchAgents");
-        std::fs::create_dir_all(&plist_dir)?;
-        let plist_path = plist_dir.join("com.gmail-proxy.plist");
-        let home_str = home.display().to_string();
-        let config_dir_str = config_dir.display().to_string();
-        let data_dir_str = data_dir.display().to_string();
-        let plist_content = LAUNCHAGENT_PLIST_TEMPLATE
-            .replace("HOME", &home_str)
-            .replace("CONFIG_DIR", &config_dir_str)
-            .replace("DATA_DIR", &data_dir_str);
-        write_always(&plist_path, &plist_content, "LaunchAgent plist")?;
-    } else {
-        // Linux: user-level systemd
-        let systemd_dir = home.join(".config/systemd/user");
-        std::fs::create_dir_all(&systemd_dir)?;
-        let unit_path = systemd_dir.join("gmail-proxy.service");
-        write_always(&unit_path, USER_SYSTEMD_UNIT, "systemd user unit")?;
-    }
-
-    // 4. Check if ~/.local/bin is in PATH
-    let bin_dir = home.join(".local/bin");
-    let bin_dir_str = bin_dir.display().to_string();
-    let in_path = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .any(|p| p == bin_dir_str || p == "~/.local/bin" || p == "$HOME/.local/bin");
-
-    println!("\nInstallation complete!");
-
-    if !in_path {
-        let shell_rc = if cfg!(target_os = "macos") {
-            "~/.zshrc"
-        } else if std::env::var("SHELL").unwrap_or_default().contains("zsh") {
-            "~/.zshrc"
-        } else {
-            "~/.bashrc"
-        };
-
-        println!();
-        println!("  Note: {} is not in your PATH. Add it with:", bin_dir.display());
-        println!("    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> {shell_rc}");
-        println!();
-        println!("  Then either restart your shell or run:");
-        println!("    source {shell_rc}");
-    }
-
-    println!("\nNext steps:");
-    println!("  1. Edit {}", config_path.display());
-    println!("  2. Run: gmail-proxy setup");
-    if cfg!(target_os = "macos") {
-        println!("  3. Start: launchctl load ~/Library/LaunchAgents/com.gmail-proxy.plist");
-    } else {
-        println!("  3. Enable service: systemctl --user enable --now gmail-proxy");
-    }
-
-    Ok(())
-}
-
-fn run_system_install(service_user: &str) -> Result<()> {
-    println!("Installing gmail-proxy (system-level)...\n");
-
-    // Check for root
-    #[cfg(unix)]
-    {
-        if !nix_is_root() {
-            anyhow::bail!("System-level install requires root. Run with sudo.");
-        }
-    }
-
-    // 1. Copy binary
-    let bin_path = Path::new("/usr/local/bin/gmail-proxy");
-    copy_binary(bin_path)?;
-
-    // 2. Create service user
-    create_service_user(service_user)?;
-
-    // 3. Create directories
-    if cfg!(target_os = "macos") {
-        let config_dir = Path::new("/etc/gmail-proxy");
-        std::fs::create_dir_all(config_dir)?;
-        let state_dir = Path::new("/var/lib/gmail-proxy");
-        std::fs::create_dir_all(state_dir)?;
-        let log_dir = Path::new("/var/log/gmail-proxy");
-        std::fs::create_dir_all(log_dir)?;
-
-        // Config file
-        let config_content = TEMPLATE_CONFIG
-            .replace("LOG_DIR_PLACEHOLDER", "/var/log/gmail-proxy")
-            .replace("STATE_DIR_PLACEHOLDER", "/var/lib/gmail-proxy");
-        write_if_not_exists(&config_dir.join("config.toml"), &config_content, "config.toml")?;
-
-        // Set ownership on state/log dirs
-        chown_dir(state_dir, service_user);
-        chown_dir(log_dir, service_user);
-
-        // LaunchDaemon plist
-        let plist_path = Path::new("/Library/LaunchDaemons/com.gmail-proxy.plist");
-        let plist_content = LAUNCHDAEMON_PLIST_TEMPLATE.replace("SERVICE_USER", service_user);
-        write_always(plist_path, &plist_content, "LaunchDaemon plist")?;
-    } else {
-        // Linux
-        let config_dir = Path::new("/etc/gmail-proxy");
-        std::fs::create_dir_all(config_dir)?;
-        let state_dir = Path::new("/var/lib/gmail-proxy");
-        std::fs::create_dir_all(state_dir)?;
-        let log_dir = Path::new("/var/log/gmail-proxy");
-        std::fs::create_dir_all(log_dir)?;
-
-        let config_content = TEMPLATE_CONFIG
-            .replace("LOG_DIR_PLACEHOLDER", "/var/log/gmail-proxy")
-            .replace("STATE_DIR_PLACEHOLDER", "/var/lib/gmail-proxy");
-        write_if_not_exists(&config_dir.join("config.toml"), &config_content, "config.toml")?;
-
-        chown_dir(state_dir, service_user);
-        chown_dir(log_dir, service_user);
-
-        // systemd unit
-        let unit_content = SYSTEM_SYSTEMD_UNIT.replace("SERVICE_USER", service_user);
-        let unit_path = Path::new("/etc/systemd/system/gmail-proxy.service");
-        write_always(unit_path, &unit_content, "systemd unit")?;
-        println!("  Run: systemctl daemon-reload");
-    }
-
-    println!("\nSystem-level installation complete!");
-    println!("\nNext steps:");
-    println!("  1. Edit /etc/gmail-proxy/config.toml");
-    println!("  2. Run: gmail-proxy setup --config /etc/gmail-proxy/config.toml --service-user {}", service_user);
-    println!("  3. Start the service (do NOT start until setup is complete)");
-
-    Ok(())
-}
-
 fn nix_is_root() -> bool {
-    // Check if running as root by trying to read a root-only indicator.
-    // On Unix, we use the `id -u` command to get the effective UID.
     std::process::Command::new("id")
         .args(["-u"])
         .output()
@@ -398,7 +244,6 @@ fn nix_is_root() -> bool {
 
 fn create_service_user(service_user: &str) -> Result<()> {
     if cfg!(target_os = "macos") {
-        // macOS: use dscl to check/create user and group
         let check = std::process::Command::new("dscl")
             .args([".", "-read", &format!("/Users/{service_user}")])
             .output();
@@ -409,25 +254,61 @@ fn create_service_user(service_user: &str) -> Result<()> {
             _ => {
                 println!("  Creating service user '{service_user}' via dscl...");
 
-                // Find an available UID/GID in the 400-499 range (macOS service accounts)
                 let uid = find_available_macos_id();
                 let uid_str = uid.to_string();
                 let user_path = format!("/Users/{service_user}");
                 let group_path = format!("/Groups/{service_user}");
 
-                // Create the group first
                 let cmds: Vec<(&str, Vec<&str>)> = vec![
                     ("dscl", vec![".", "-create", &group_path]),
-                    ("dscl", vec![".", "-create", &group_path, "PrimaryGroupID", &uid_str]),
-                    ("dscl", vec![".", "-create", &group_path, "RealName", "Gmail Proxy Service"]),
+                    (
+                        "dscl",
+                        vec![".", "-create", &group_path, "PrimaryGroupID", &uid_str],
+                    ),
+                    (
+                        "dscl",
+                        vec![
+                            ".",
+                            "-create",
+                            &group_path,
+                            "RealName",
+                            "Gmail Proxy Service",
+                        ],
+                    ),
                     ("dscl", vec![".", "-create", &group_path, "Password", "*"]),
-                    // Create the user
                     ("dscl", vec![".", "-create", &user_path]),
-                    ("dscl", vec![".", "-create", &user_path, "UniqueID", &uid_str]),
-                    ("dscl", vec![".", "-create", &user_path, "PrimaryGroupID", &uid_str]),
-                    ("dscl", vec![".", "-create", &user_path, "UserShell", "/usr/bin/false"]),
-                    ("dscl", vec![".", "-create", &user_path, "RealName", "Gmail Proxy Service"]),
-                    ("dscl", vec![".", "-create", &user_path, "NFSHomeDirectory", "/var/empty"]),
+                    (
+                        "dscl",
+                        vec![".", "-create", &user_path, "UniqueID", &uid_str],
+                    ),
+                    (
+                        "dscl",
+                        vec![".", "-create", &user_path, "PrimaryGroupID", &uid_str],
+                    ),
+                    (
+                        "dscl",
+                        vec![".", "-create", &user_path, "UserShell", "/usr/bin/false"],
+                    ),
+                    (
+                        "dscl",
+                        vec![
+                            ".",
+                            "-create",
+                            &user_path,
+                            "RealName",
+                            "Gmail Proxy Service",
+                        ],
+                    ),
+                    (
+                        "dscl",
+                        vec![
+                            ".",
+                            "-create",
+                            &user_path,
+                            "NFSHomeDirectory",
+                            "/var/empty",
+                        ],
+                    ),
                     ("dscl", vec![".", "-create", &user_path, "Password", "*"]),
                 ];
 
@@ -441,10 +322,16 @@ fn create_service_user(service_user: &str) -> Result<()> {
                 }
 
                 if ok {
-                    println!("  Created service user and group '{service_user}' (UID/GID {uid})");
+                    println!(
+                        "  Created service user and group '{service_user}' (UID/GID {uid})"
+                    );
                 } else {
-                    eprintln!("  Warning: failed to fully create service user '{service_user}'");
-                    eprintln!("  You may need to create it manually via System Settings or dscl");
+                    eprintln!(
+                        "  Warning: failed to fully create service user '{service_user}'"
+                    );
+                    eprintln!(
+                        "  You may need to create it manually via System Settings or dscl"
+                    );
                 }
             }
         }
@@ -463,7 +350,8 @@ fn create_service_user(service_user: &str) -> Result<()> {
                     .args([
                         "--system",
                         "--no-create-home",
-                        "--shell", "/usr/sbin/nologin",
+                        "--shell",
+                        "/usr/sbin/nologin",
                         service_user,
                     ])
                     .status();
@@ -472,7 +360,9 @@ fn create_service_user(service_user: &str) -> Result<()> {
                         println!("  Created service user '{service_user}'");
                     }
                     _ => {
-                        eprintln!("  Warning: failed to create service user '{service_user}'");
+                        eprintln!(
+                            "  Warning: failed to create service user '{service_user}'"
+                        );
                         eprintln!("  You may need to create it manually with:");
                         eprintln!("    useradd --system --no-create-home --shell /usr/sbin/nologin {service_user}");
                     }
@@ -483,10 +373,64 @@ fn create_service_user(service_user: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add a user to a group so they can access the socket directory.
+fn add_user_to_group(user: &str, group: &str) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        let status = std::process::Command::new("dseditgroup")
+            .args(["-o", "edit", "-a", user, "-t", "user", group])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("  Added '{user}' to group '{group}'");
+            }
+            _ => {
+                eprintln!(
+                    "  Warning: could not add '{user}' to group '{group}'. Run manually:"
+                );
+                eprintln!("    sudo dseditgroup -o edit -a {user} -t user {group}");
+            }
+        }
+    } else {
+        let status = std::process::Command::new("usermod")
+            .args(["-aG", group, user])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("  Added '{user}' to group '{group}'");
+            }
+            _ => {
+                eprintln!(
+                    "  Warning: could not add '{user}' to group '{group}'. Run manually:"
+                );
+                eprintln!("    sudo usermod -aG {group} {user}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Create the socket directory with setgid bit so the socket inherits the service group.
+fn setup_socket_dir(service_user: &str) -> Result<()> {
+    let socket_dir = Path::new("/var/run/gmail-proxy");
+    std::fs::create_dir_all(socket_dir)?;
+    chown_dir(socket_dir, service_user);
+    // Set mode 2750 (setgid + rwxr-x---)
+    let status = std::process::Command::new("chmod")
+        .args(["2750", &socket_dir.display().to_string()])
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("  Set socket directory mode to 2750 (setgid)"),
+        _ => {
+            eprintln!("  Warning: could not set socket directory mode. Run manually:");
+            eprintln!("    chmod 2750 {}", socket_dir.display());
+        }
+    }
+    Ok(())
+}
+
 /// Find an available UID/GID in the 400-499 range for macOS service accounts.
 fn find_available_macos_id() -> u32 {
     for id in 400..500 {
-        // Check if UID is taken
         let uid_check = std::process::Command::new("dscl")
             .args([".", "-search", "/Users", "UniqueID", &id.to_string()])
             .output();
@@ -495,9 +439,14 @@ fn find_available_macos_id() -> u32 {
             .map(|o| !o.stdout.is_empty() && o.stdout != b"\n")
             .unwrap_or(false);
 
-        // Check if GID is taken
         let gid_check = std::process::Command::new("dscl")
-            .args([".", "-search", "/Groups", "PrimaryGroupID", &id.to_string()])
+            .args([
+                ".",
+                "-search",
+                "/Groups",
+                "PrimaryGroupID",
+                &id.to_string(),
+            ])
             .output();
         let gid_taken = gid_check
             .as_ref()
@@ -508,13 +457,10 @@ fn find_available_macos_id() -> u32 {
             return id;
         }
     }
-    // Fallback — unlikely to get here
     450
 }
 
 fn chown_dir(path: &Path, user: &str) {
-    // On macOS, use user:user since we create a matching group.
-    // On Linux, useradd --system also creates a matching group.
     let ownership = format!("{user}:{user}");
     let status = std::process::Command::new("chown")
         .args(["-R", &ownership, &path.display().to_string()])
@@ -524,8 +470,29 @@ fn chown_dir(path: &Path, user: &str) {
             println!("  Set ownership of {} to {user}", path.display());
         }
         _ => {
-            eprintln!("  Warning: could not chown {}. Run manually:", path.display());
+            eprintln!(
+                "  Warning: could not chown {}. Run manually:",
+                path.display()
+            );
             eprintln!("    chown -R {ownership} {}", path.display());
+        }
+    }
+}
+
+fn set_dir_mode(path: &Path, mode: &str) {
+    let status = std::process::Command::new("chmod")
+        .args([mode, &path.display().to_string()])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("  Set mode of {} to {mode}", path.display());
+        }
+        _ => {
+            eprintln!(
+                "  Warning: could not chmod {}. Run manually:",
+                path.display()
+            );
+            eprintln!("    chmod {mode} {}", path.display());
         }
     }
 }
