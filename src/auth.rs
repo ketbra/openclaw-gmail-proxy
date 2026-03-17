@@ -163,19 +163,15 @@ struct GoogleClientCreds {
 /// 3. Opens the browser for OAuth consent
 /// 4. Exchanges the authorization code for a refresh token
 /// 5. Writes secrets.toml
+/// 6. Installs the OpenClaw skill file
+/// 7. Configures the OpenClaw webhook
 pub async fn run_oauth_setup(
-    config_path: Option<PathBuf>,
+    config_path: PathBuf,
     client_json: Option<PathBuf>,
-    service_user: Option<String>,
+    service_user: &str,
+    openclaw_user: &str,
+    openclaw_config: Option<PathBuf>,
 ) -> Result<()> {
-    // Resolve config path
-    let config_path = config_path.unwrap_or_else(|| {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("gmail-proxy")
-            .join("config.toml")
-    });
-
     if !config_path.exists() {
         anyhow::bail!(
             "Config file not found at {}. Run 'gmail-proxy install' first.",
@@ -390,36 +386,84 @@ pub async fn run_oauth_setup(
     }
     println!("Wrote {}", secrets_path.display());
 
-    // Step 9: If --service-user, chown
-    if let Some(user) = service_user {
+    // Step 9: Chown secrets to service user
+    {
         let chown_result = std::process::Command::new("sudo")
             .args([
                 "chown",
-                &format!("{user}:{user}"),
+                &format!("{service_user}:{service_user}"),
                 &secrets_path.display().to_string(),
             ])
             .status();
 
         match chown_result {
             Ok(s) if s.success() => {
-                println!("Set ownership of secrets.toml to {user}");
+                println!("Set ownership of secrets.toml to {service_user}");
             }
             _ => {
                 eprintln!("Could not chown secrets.toml. Run manually:");
-                eprintln!("  sudo chown {user}:{user} {}", secrets_path.display());
+                eprintln!("  sudo chown {service_user}:{service_user} {}", secrets_path.display());
                 eprintln!("  chmod 0600 {}", secrets_path.display());
             }
         }
     }
 
-    // Step 10: Print summary
+    // Step 10: Install OpenClaw skill
+    let openclaw_home = get_user_home(openclaw_user)?;
+    let workspace = openclaw_home.join(".openclaw/workspace");
+    let skill_installed;
+    if workspace.is_dir() {
+        let skill_dir = workspace.join("skills/gmail-proxy");
+        std::fs::create_dir_all(&skill_dir)
+            .with_context(|| format!("failed to create {}", skill_dir.display()))?;
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_path, crate::SKILL_CONTENT)
+            .with_context(|| format!("failed to write {}", skill_path.display()))?;
+        println!("Installed skill to {}", skill_path.display());
+        skill_installed = true;
+    } else {
+        println!("OpenClaw workspace not found at {}, skipping skill install", workspace.display());
+        println!("  Install manually: gmail-proxy install-skill --workspace /path/to/workspace");
+        skill_installed = false;
+    }
+
+    // Step 11: Configure OpenClaw webhook
+    let openclaw_json_path = openclaw_config.unwrap_or_else(|| {
+        openclaw_home.join(".openclaw/openclaw.json")
+    });
+
+    let webhook_configured;
+    if openclaw_json_path.exists() {
+        // Prompt user
+        use std::io::Write;
+        print!("\nConfigure OpenClaw webhook for gmail-proxy? [Y/n] ");
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        if input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
+            configure_openclaw_webhook(&openclaw_json_path, &hook_token)?;
+            println!("Configured webhook mapping 'gmail-proxy' in {}", openclaw_json_path.display());
+            webhook_configured = true;
+        } else {
+            webhook_configured = false;
+        }
+    } else {
+        println!("openclaw.json not found at {}, skipping webhook configuration", openclaw_json_path.display());
+        webhook_configured = false;
+    }
+
+    // Step 12: Print summary
     println!("\nSetup complete!");
     println!("  Config:  {}", config_path.display());
-    println!("  Secrets: {}", secrets_path.display());
+    println!("  Secrets: {} (owned by {service_user})", secrets_path.display());
+    println!("  Skill:   {}", if skill_installed { "installed" } else { "skipped" });
+    println!("  Webhook: {}", if webhook_configured { "configured" } else { "skipped" });
     println!("\nNext steps:");
     println!("  1. Verify your config.toml settings (Gmail account, Pub/Sub topic, etc.)");
     println!("  2. Create the '{}' label in Gmail if it doesn't exist", "agent-blocked");
-    println!("  3. Start the proxy: gmail-proxy serve");
+    println!("  3. Start the proxy: systemctl start gmail-proxy");
 
     Ok(())
 }
@@ -438,4 +482,87 @@ fn urlencoding(s: &str) -> String {
         }
     }
     result
+}
+
+/// Look up a user's home directory by username.
+fn get_user_home(username: &str) -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use nix::unistd::User;
+        if let Some(user) = User::from_name(username)
+            .context("failed to look up user")?
+        {
+            return Ok(user.dir);
+        }
+    }
+    anyhow::bail!("Could not find home directory for user '{username}'")
+}
+
+/// Configure the gmail-proxy webhook mapping in openclaw.json.
+fn configure_openclaw_webhook(path: &Path, hook_token: &str) -> Result<()> {
+    // Read existing config
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    // Parse as JSON5 -> serde_json::Value
+    let mut config: serde_json::Value = json5::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+
+    // Ensure hooks section exists
+    let hooks = config.as_object_mut()
+        .context("openclaw.json root is not an object")?
+        .entry("hooks")
+        .or_insert(serde_json::json!({}));
+
+    let hooks_obj = hooks.as_object_mut()
+        .context("hooks is not an object")?;
+
+    // Set enabled = true
+    hooks_obj.insert("enabled".into(), serde_json::json!(true));
+
+    // Set token if not already set
+    if !hooks_obj.contains_key("token") {
+        hooks_obj.insert("token".into(), serde_json::json!(hook_token));
+    }
+
+    // Ensure mappings array exists
+    let mappings = hooks_obj
+        .entry("mappings")
+        .or_insert(serde_json::json!([]));
+
+    let mappings_arr = mappings.as_array_mut()
+        .context("hooks.mappings is not an array")?;
+
+    // Check if gmail-proxy mapping already exists
+    let existing_idx = mappings_arr.iter().position(|m| {
+        m.get("id").and_then(|v| v.as_str()) == Some("gmail-proxy")
+    });
+
+    let mapping = serde_json::json!({
+        "id": "gmail-proxy",
+        "match": { "path": "gmail-proxy" },
+        "action": "agent",
+        "wakeMode": "now",
+        "name": "Gmail Proxy",
+        "sessionKey": "hook:gmail-proxy:{{messages[0].id}}",
+        "messageTemplate": "New email from {{messages[0].from}}\nSubject: {{messages[0].subject}}\n\n{{messages[0].body_text}}",
+        "deliver": true,
+        "channel": "last"
+    });
+
+    if let Some(idx) = existing_idx {
+        println!("  Updating existing gmail-proxy webhook mapping");
+        mappings_arr[idx] = mapping;
+    } else {
+        println!("  Adding gmail-proxy webhook mapping");
+        mappings_arr.push(mapping);
+    }
+
+    // Write back as pretty JSON (valid JSON5)
+    let output = serde_json::to_string_pretty(&config)
+        .context("failed to serialize openclaw.json")?;
+    std::fs::write(path, &output)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+
+    Ok(())
 }

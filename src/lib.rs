@@ -6,3 +6,5 @@ pub mod install;
 pub mod poller;
 pub mod proxy;
 pub mod scrub;
+
+pub const SKILL_CONTENT: &str = include_str!("../skill/SKILL.md");
