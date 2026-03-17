@@ -25,7 +25,7 @@ url_strip_patterns = ["https?://tracking\\.example\\.com/.*"]
 allowed_operators = ["from", "to", "subject"]
 
 [proxy]
-bind = "127.0.0.1:8080"
+socket_path = "/tmp/test.sock"
 search_fetch_concurrency = 4
 
 [openclaw]
@@ -66,7 +66,7 @@ fn test_load_valid_config() {
     assert_eq!(config.scrub.blocked_label, "BLOCKED");
     assert_eq!(config.scrub.otp_patterns, vec!["\\b\\d{6}\\b"]);
     assert_eq!(config.scrub.allowed_operators, vec!["from", "to", "subject"]);
-    assert_eq!(config.proxy.bind, "127.0.0.1:8080");
+    assert_eq!(config.proxy.socket_path, "/tmp/test.sock");
     assert_eq!(config.proxy.search_fetch_concurrency, 4);
     assert_eq!(config.openclaw.hook_url, "https://openclaw.example.com/hook");
     assert_eq!(config.audit.log_dir, "audit_logs");
@@ -113,7 +113,7 @@ url_strip_patterns = []
 allowed_operators = []
 
 [proxy]
-bind = "127.0.0.1:8080"
+socket_path = "/tmp/test.sock"
 search_fetch_concurrency = 2
 
 [openclaw]
@@ -165,7 +165,7 @@ url_strip_patterns = []
 allowed_operators = []
 
 [proxy]
-bind = "127.0.0.1:8080"
+socket_path = "/tmp/test.sock"
 search_fetch_concurrency = 2
 
 [openclaw]
